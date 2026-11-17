@@ -542,6 +542,7 @@ h2.section-title{margin-top:26px}
       <button class="btn btn-primary btn-small" id="book-import-btn">📥 导入单词</button>
       <button class="btn btn-ghost btn-small" id="book-add-word-btn">＋ 添加单词</button>
       <button class="btn btn-ghost btn-small" id="book-export-btn">⬇ 导出 CSV</button>
+      <button class="btn btn-ghost btn-small" id="book-export-missing-btn">📋 缺例句清单</button>
     </div>
     <div id="book-list"></div>
   </section>
@@ -599,7 +600,7 @@ h2.section-title{margin-top:26px}
         <button class="btn btn-danger btn-small" id="set-reset">清空全部数据</button>
       </div>
     </div>
-    <p class="muted" style="text-align:center;margin-top:20px;font-size:12.5px">词斩背单词 v1.2 · 数据保存在浏览器本地 · 离线词库 20,809 词 · iPhone 可用 Safari 打开本站并「添加到主屏幕」</p>
+    <p class="muted" style="text-align:center;margin-top:20px;font-size:12.5px">词斩背单词 v1.3 · 数据保存在浏览器本地 · 离线词库 20,809 词 · iPhone 可用 Safari 打开本站并「添加到主屏幕」</p>
   </section>
 </main>
 
@@ -746,9 +747,9 @@ async function translateSafe(text){
     return {ok:false};
   } catch(e){ return {ok:false}; }
 }
-async function enrichWord(text, keepUserMeaning){
+async function enrichWord(text, keepUserMeaning, force){
   const key = (text || '').toLowerCase().trim();
-  if (!keepUserMeaning && dictCache[key]) {
+  if (!keepUserMeaning && !force && dictCache[key]) {
     const c = dictCache[key];
     return { phonetic: c.phonetic, meanings: c.meanings.slice(), sentences: c.sentences.slice(), quota: false };
   }
@@ -1487,7 +1488,7 @@ function openWordModal(w){
     }
     if (act === 'refetch') {
       a.disabled = true; a.textContent = '获取中…';
-      const res = await enrichWord(w.text, false);
+      const res = await enrichWord(w.text, false, true);
       if (res.meanings && res.meanings.length) w.meanings = res.meanings;
       if (res.phonetic) w.phonetic = w.phonetic || res.phonetic;
       if (res.sentences && res.sentences.length) w.sentences = res.sentences;
@@ -1495,7 +1496,9 @@ function openWordModal(w){
       if (!w.meanings.length) w.missing.push('释义');
       if (!w.sentences.length) w.missing.push('例句');
       save(); closeModal(); renderBookView();
-      toast(res.meanings.length || res.sentences.length ? '已更新词典数据' : '未获取到数据（可能网络问题）', res.meanings.length ? 'ok' : '');
+      if (res.sentences.length) toast('已获取到例句 ✓', 'ok');
+      else if (res.meanings.length) toast('已更新释义，但该词在线词典确实没有例句，可用「缺例句清单」导出后发我补全');
+      else toast('在线词典没有该词数据。可导出「缺例句清单」发我补全', 'err');
     }
   };
 }
@@ -1786,7 +1789,7 @@ function showImportPreview(entries, bookId){
   openModal('<h3>📄 解析结果<button class="close-x" data-act="x">✕</button></h3>' +
     '<p class="muted">共识别 <b>' + uniq.length + '</b> 个单词' +
     (uniq.length > 30 ? '（仅显示前 30 个）' : '') +
-    '，其中 ' + uniq.filter(e => e._dup).length + ' 个已存在将被跳过。</p>' +
+    '，其中 ' + uniq.filter(e => e._dup).length + ' 个已存在（携带例句/释义的会自动更新进去）。</p>' +
     '<div class="preview-list mt8">' + preview + '</div>' +
     '<div class="hint">导入后将自动联网获取：中文释义、音标、例句与翻译（带释义的行保留原释义）。网络失败也不影响导入，之后可逐个补充。</div>' +
     '<div class="modal-foot"><button class="btn btn-ghost" data-act="back">← 返回</button>' +
@@ -1838,9 +1841,25 @@ async function runImport(entries, bookId){
   if (!book) { closeModal(); return; }
   const existing = new Set(book.words.map(w => w.text.toLowerCase()));
   const added = [];
+  const updated = [];
+  const hasData = e => (e.sentences && e.sentences.length) || (e.meanings && e.meanings.length) || (e.meaning && e.meaning.trim());
   for (const e of entries) {
-    if (e._dup || existing.has(e.word.toLowerCase())) continue;
-    existing.add(e.word.toLowerCase());
+    const ekey = e.word.toLowerCase();
+    if (existing.has(ekey)) {
+      const w = book.words.find(x => x.text.toLowerCase() === ekey);
+      if (w && hasData(e)) {
+        if (e.sentences && e.sentences.length) w.sentences = e.sentences.slice(0, 3);
+        if (e.meanings && e.meanings.length) w.meanings = e.meanings.slice();
+        else if (e.meaning && e.meaning.trim()) w.meanings = e.meaning.split('\n').map(s => s.trim()).filter(Boolean);
+        if (e.phonetic) w.phonetic = e.phonetic;
+        w.missing = [];
+        if (!w.meanings.length) w.missing.push('释义');
+        if (!w.sentences.length) w.missing.push('例句');
+        updated.push(w);
+      }
+      continue;
+    }
+    existing.add(ekey);
     const w = {
       id: uid(), text: e.word, phonetic: e.phonetic || '',
       usphone: '', ukphone: '',
@@ -1854,17 +1873,19 @@ async function runImport(entries, bookId){
     added.push(w);
   }
   save();
-  if (!added.length) { closeModal(); toast('没有新单词可导入', 'err'); return; }
-  openModal('<h3>🔄 正在获取词典数据<button class="close-x" data-act="x" hidden>✕</button></h3>' +
-    '<p class="muted">为 ' + added.length + ' 个单词获取中文释义、音标和例句…</p>' +
-    '<div class="progress-outer modal-prog"><div class="progress-inner" id="import-prog" style="width:0"></div></div>' +
-    '<div class="prog-text" id="import-prog-text">0 / ' + added.length + '</div>' +
-    '<div class="hint">每词需联网查询约 1~2 秒，可以先去忙别的。离线词库能查到的单词会瞬间完成。</div>');
+  if (!added.length && !updated.length) { closeModal(); toast('没有可导入的新内容', 'err'); return; }
   let quotaHit = false;
-  const queue = added.slice();
+  const queue = added.concat(updated.filter(w => !(w.sentences && w.sentences.length)));
+  if (queue.length) {
+    openModal('<h3>🔄 正在获取词典数据<button class="close-x" data-act="x" hidden>✕</button></h3>' +
+      '<p class="muted">为 ' + queue.length + ' 个单词获取中文释义、音标和例句…</p>' +
+      '<div class="progress-outer modal-prog"><div class="progress-inner" id="import-prog" style="width:0"></div></div>' +
+      '<div class="prog-text" id="import-prog-text">0 / ' + queue.length + '</div>' +
+      '<div class="hint">每词需联网查询约 1~2 秒，可以先去忙别的。离线词库能查到的单词会瞬间完成。</div>');
+  }
   let done = 0, failed = 0;
   const tick = () => {
-    const pct = Math.round(done / added.length * 100);
+    const pct = Math.round(done / queue.length * 100);
     $('#import-prog').style.width = pct + '%';
     $('#import-prog-text').textContent = done + ' / ' + added.length + (failed ? '（' + failed + ' 个失败）' : '') + (quotaHit ? '（翻译额度用尽，可稍后在单词本中补充例句）' : '');
   };
@@ -1891,7 +1912,7 @@ async function runImport(entries, bookId){
   await Promise.all([worker(), worker(), worker()]);
   closeModal();
   openModal('<h3>✅ 导入完成</h3>' +
-    '<p class="muted">新增 <b>' + added.length + '</b> 个单词到「' + esc(book.name) + '」' +
+    '<p class="muted">新增 <b>' + added.length + '</b> 个、更新例句 <b>' + updated.length + '</b> 个到「' + esc(book.name) + '」' +
     (failed ? '，其中 ' + failed + ' 个联网查询失败' : '') +
     (quotaHit ? '。翻译额度已用尽，缺例句的单词可稍后在单词本中点击补充。' : '') +
     '</p><div class="modal-foot"><button class="btn btn-ghost" data-act="home">返回首页</button>' +
@@ -1940,6 +1961,7 @@ document.addEventListener('drop', e => {
 $('#book-import-btn').onclick = () => openImportModal(state.currentBookId);
 $('#book-add-word-btn').onclick = () => openAddWordModal();
 $('#book-export-btn').onclick = exportBookCSV;
+$('#book-export-missing-btn').onclick = exportMissingCSV;
 $('#book-search').addEventListener('input', debounce(renderBookView, 200));
 $$('#view-book .filter-chip').forEach(ch => ch.addEventListener('click', () => {
   $$('#view-book .filter-chip').forEach(c => c.classList.remove('active'));
@@ -2002,6 +2024,22 @@ function exportBookCSV(){
   }).join(',')).join('\r\n');
   download('词斩单词本-' + b.name + '.csv', csv, 'text/csv;charset=utf-8');
 }
+function exportMissingCSV(){
+  const b = currentBook();
+  if (!b) return;
+  const rows = [['word','meaning']];
+  for (const w of b.words) {
+    if (w.sentences && w.sentences.length) continue;
+    rows.push([w.text, (w.meanings || []).join(' / ')]);
+  }
+  if (rows.length === 1) { toast('全部单词都有例句 🎉', 'ok'); return; }
+  const csv = '\ufeff' + rows.map(r => r.map(c => {
+    const s = String(c ?? '');
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }).join(',')).join('\r\n');
+  download('缺例句清单-' + b.name + '.csv', csv, 'text/csv;charset=utf-8');
+  toast('已导出 ' + (rows.length - 1) + ' 个缺例句单词，把文件发给我即可补全');
+}
 function debounce(fn, ms){
   let t;
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
@@ -2040,7 +2078,7 @@ window.__CZ = {
   seedSampleIfEmpty,
   openImportModal,
 };
-console.log('词斩背单词 v1.2 · 离线词库 ' + Object.keys(DICT).length + ' 词 · 词形映射 ' + Object.keys(LEMMA).length + ' 项');
+console.log('词斩背单词 v1.3 · 离线词库 ' + Object.keys(DICT).length + ' 词 · 词形映射 ' + Object.keys(LEMMA).length + ' 项');
 </script>
 </body>
 </html>
