@@ -543,6 +543,7 @@ h2.section-title{margin-top:26px}
       <button class="btn btn-ghost btn-small" id="book-add-word-btn">＋ 添加单词</button>
       <button class="btn btn-ghost btn-small" id="book-export-btn">⬇ 导出 CSV</button>
       <button class="btn btn-ghost btn-small" id="book-export-missing-btn">📋 缺例句清单</button>
+      <button class="btn btn-ghost btn-small" id="book-batch-enrich-btn">🔌 一键联网补全</button>
     </div>
     <div id="book-list"></div>
   </section>
@@ -600,7 +601,7 @@ h2.section-title{margin-top:26px}
         <button class="btn btn-danger btn-small" id="set-reset">清空全部数据</button>
       </div>
     </div>
-    <p class="muted" style="text-align:center;margin-top:20px;font-size:12.5px">词斩背单词 v1.3 · 数据保存在浏览器本地 · 离线词库 20,809 词 · iPhone 可用 Safari 打开本站并「添加到主屏幕」</p>
+    <p class="muted" style="text-align:center;margin-top:20px;font-size:12.5px">词斩背单词 v1.4 · 数据保存在浏览器本地 · 离线词库 20,809 词 · iPhone 可用 Safari 打开本站并「添加到主屏幕」</p>
   </section>
 </main>
 
@@ -747,6 +748,30 @@ async function translateSafe(text){
     return {ok:false};
   } catch(e){ return {ok:false}; }
 }
+function fetchJsonp(url, cbParam, timeout){
+  return new Promise((res, rej) => {
+    const name = '__jp' + Math.random().toString(36).slice(2, 10);
+    const s = document.createElement('script');
+    const to = setTimeout(() => { cleanup(); rej(new Error('jsonp timeout')); }, timeout || 12000);
+    function cleanup(){ try { delete window[name]; } catch(e){} s.remove(); clearTimeout(to); }
+    window[name] = data => { cleanup(); res(data); };
+    s.onerror = () => { cleanup(); rej(new Error('jsonp load error')); };
+    s.src = url + (url.includes('?') ? '&' : '?') + cbParam + '=' + name;
+    document.head.appendChild(s);
+  });
+}
+async function youdoSuggest(word){
+  try {
+    const d = await fetchJsonp('https://dict.youdao.com/suggest?q=' + encodeURIComponent(word) + '&num=5&doctype=json', 'callback', 10000);
+    const entries = (d && d.data && d.data.entries) || [];
+    const exact = entries.find(e => e.entry && e.entry.toLowerCase() === word.toLowerCase()) || entries[0];
+    if (exact && exact.explain) {
+      const parts = String(exact.explain).split(/[;；]/).map(s => s.trim()).filter(Boolean);
+      return parts.length ? parts : [String(exact.explain).trim()];
+    }
+  } catch(e){}
+  return null;
+}
 async function enrichWord(text, keepUserMeaning, force){
   const key = (text || '').toLowerCase().trim();
   if (!keepUserMeaning && !force && dictCache[key]) {
@@ -754,23 +779,35 @@ async function enrichWord(text, keepUserMeaning, force){
     return { phonetic: c.phonetic, meanings: c.meanings.slice(), sentences: c.sentences.slice(), quota: false };
   }
   const res = { phonetic:'', meanings:[], sentences:[], quota:false };
+  const haveUser = keepUserMeaning === true;
+  /* 1) 离线词库（含词形还原），瞬间完成 */
   const loc = lookupLocal(key);
   if (loc && loc.phonetic) res.phonetic = loc.phonetic;
-  const haveUser = keepUserMeaning === true;
   if (!haveUser && loc && loc.meanings.length) res.meanings = loc.meanings;
+  /* 2) 有道 suggest（JSONP，中文释义） */
+  if (!haveUser && !res.meanings.length) {
+    const yd = await youdoSuggest(key);
+    if (yd && yd.length) res.meanings = yd;
+  }
+  /* 3) dictionaryapi：音标 + 英文释义(翻译成中文) + 例句(翻译) */
   try {
     const d = await fetchJSON('https://api.dictionaryapi.dev/api/v2/entries/en/' + encodeURIComponent(key), 14000);
     if (d && d.length) {
       const e = d[0];
       if (!res.phonetic) res.phonetic = e.phonetic || ((e.phonetics||[]).map(p=>p.text).find(Boolean)) || '';
       const exs = [];
-      const defs = [];
+      let firstDef = null;
       for (const m of (e.meanings || [])) {
-        const df = (m.definitions || [])[0];
-        if (df && df.definition) defs.push(m.partOfSpeech + '. ' + df.definition);
+        if (!firstDef && m.definitions && m.definitions[0] && m.definitions[0].definition) firstDef = m.partOfSpeech + '. ' + m.definitions[0].definition;
         for (const df2 of (m.definitions || [])) if (df2.example) exs.push(df2.example);
       }
-      if (!haveUser && !res.meanings.length && defs.length) res.meanings = defs.slice(0, 4);
+      if (!haveUser && !res.meanings.length && firstDef) {
+        const tr = await translateSafe(firstDef);
+        if (tr.quota) res.quota = true;
+        if (tr.ok && tr.text) res.meanings = [tr.text];
+        else res.meanings = [firstDef];
+        await sleep(250);
+      }
       for (const ex of exs.slice(0, 2)) {
         const tr = await translateSafe(ex);
         if (tr.quota) { res.quota = true; break; }
@@ -779,6 +816,7 @@ async function enrichWord(text, keepUserMeaning, force){
       }
     }
   } catch(e){ /* offline or 404: keep going */ }
+  /* 4) 词本身翻译兜底 */
   if (!res.meanings.length && !haveUser) {
     const tr = await translateSafe(key);
     if (tr.quota) res.quota = true;
@@ -1962,6 +2000,7 @@ $('#book-import-btn').onclick = () => openImportModal(state.currentBookId);
 $('#book-add-word-btn').onclick = () => openAddWordModal();
 $('#book-export-btn').onclick = exportBookCSV;
 $('#book-export-missing-btn').onclick = exportMissingCSV;
+$('#book-batch-enrich-btn').onclick = batchEnrichBook;
 $('#book-search').addEventListener('input', debounce(renderBookView, 200));
 $$('#view-book .filter-chip').forEach(ch => ch.addEventListener('click', () => {
   $$('#view-book .filter-chip').forEach(c => c.classList.remove('active'));
@@ -2024,6 +2063,54 @@ function exportBookCSV(){
   }).join(',')).join('\r\n');
   download('词斩单词本-' + b.name + '.csv', csv, 'text/csv;charset=utf-8');
 }
+async function batchEnrichBook(){
+  const b = currentBook();
+  if (!b) return;
+  const targets = b.words.filter(w => !(w.sentences && w.sentences.length) || !(w.meanings && w.meanings.length));
+  if (!targets.length) { toast('所有单词都有释义和例句 🎉', 'ok'); return; }
+  openModal('<h3>🔌 一键联网补全<button class="close-x" data-act="x" hidden>✕</button></h3>' +
+    '<p class="muted">为 ' + targets.length + ' 个缺释义/例句的单词联网查询…</p>' +
+    '<div class="progress-outer modal-prog"><div class="progress-inner" id="batch-prog" style="width:0"></div></div>' +
+    '<div class="prog-text" id="batch-prog-text">0 / ' + targets.length + '</div>' +
+    '<div class="hint">每个词约 1~2 秒，请稍候；进度实时保存。</div>');
+  let quotaHit = false;
+  const queue = targets.slice();
+  let done = 0, gotMean = 0, gotSent = 0;
+  const tick = () => {
+    $('#batch-prog').style.width = Math.round(done / targets.length * 100) + '%';
+    $('#batch-prog-text').textContent = done + ' / ' + targets.length + '（释义 +' + gotMean + ' 例句 +' + gotSent + '）' + (quotaHit ? ' · 翻译额度用尽' : '');
+  };
+  const worker = async () => {
+    while (queue.length) {
+      const w = queue.shift();
+      if (!quotaHit) {
+        try {
+          const res = await enrichWord(w.text, (w.meanings && w.meanings.length) > 0, true);
+          const hadM = (w.meanings && w.meanings.length) > 0;
+          const hadS = (w.sentences && w.sentences.length) > 0;
+          if (!hadM && res.meanings && res.meanings.length) { w.meanings = res.meanings; gotMean++; }
+          if (res.phonetic && !w.phonetic) w.phonetic = res.phonetic;
+          if (!hadS && res.sentences && res.sentences.length) { w.sentences = res.sentences; gotSent++; }
+          if (res.quota) quotaHit = true;
+          w.missing = [];
+          if (!w.meanings.length) w.missing.push('释义');
+          if (!w.sentences.length) w.missing.push('例句');
+        } catch(e){}
+      }
+      done++; tick(); save();
+      await sleep(300 + Math.random() * 250);
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  const stillMiss = b.words.filter(w => !(w.sentences && w.sentences.length)).length;
+  closeModal();
+  openModal('<h3>✅ 补全完成</h3>' +
+    '<p class="muted">补到释义 <b>' + gotMean + '</b> 个，例句 <b>' + gotSent + '</b> 个' +
+    (stillMiss ? '；仍有 <b>' + stillMiss + '</b> 个缺例句（在线词典无数据），可导出「缺例句清单」发我补全' : '，全部单词都有例句了 🎉') +
+    '</p><div class="modal-foot"><button class="btn btn-primary" data-act="x">完成</button></div>');
+  $('#modal-root').onclick = e => { if (e.target.closest('[data-act=x]')) closeModal(); };
+  renderBookView();
+}
 function exportMissingCSV(){
   const b = currentBook();
   if (!b) return;
@@ -2078,7 +2165,7 @@ window.__CZ = {
   seedSampleIfEmpty,
   openImportModal,
 };
-console.log('词斩背单词 v1.3 · 离线词库 ' + Object.keys(DICT).length + ' 词 · 词形映射 ' + Object.keys(LEMMA).length + ' 项');
+console.log('词斩背单词 v1.4 · 离线词库 ' + Object.keys(DICT).length + ' 词 · 词形映射 ' + Object.keys(LEMMA).length + ' 项');
 </script>
 </body>
 </html>
