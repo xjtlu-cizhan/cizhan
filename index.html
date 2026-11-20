@@ -601,7 +601,7 @@ h2.section-title{margin-top:26px}
         <button class="btn btn-danger btn-small" id="set-reset">清空全部数据</button>
       </div>
     </div>
-    <p class="muted" style="text-align:center;margin-top:20px;font-size:12.5px">词斩背单词 v1.6 · 数据保存在浏览器本地 · 离线词库 + 双语例句库 + 雅思词库 5029 词 · iPhone 可用 Safari 打开本站并「添加到主屏幕」</p>
+    <p class="muted" style="text-align:center;margin-top:20px;font-size:12.5px">词斩背单词 v1.7 · 数据保存在浏览器本地 · 离线词库 + 双语例句库 + 雅思词库 · iPhone 可用 Safari 打开本站并「添加到主屏幕」</p>
   </section>
 </main>
 
@@ -679,7 +679,7 @@ const SAMPLE = JSON.parse(document.getElementById('sample-data').textContent);
 const SENT = JSON.parse(document.getElementById('sent-data').textContent);
 const IELTS_WORDS = JSON.parse(document.getElementById('ielts-data').textContent);
 const LS_KEY = 'cz_data_v1';
-const CACHE_KEY = 'cz_dictcache_v1';
+const CACHE_KEY = 'cz_dictcache_v2';
 
 function defaultState(){
   return {
@@ -1947,8 +1947,29 @@ async function runImport(entries, bookId){
   }
   save();
   if (!added.length && !updated.length) { closeModal(); toast('没有可导入的新内容', 'err'); return; }
+  /* 从已有词本（如雅思词库）继承释义和例句 */
+  let inherited = 0;
+  for (const w of added) {
+    if (w.sentences.length && w.meanings.length) continue;
+    let donor = null;
+    for (const b2 of state.books) {
+      if (b2.id === book.id) continue;
+      const d = b2.words.find(x => x.text.toLowerCase() === w.text.toLowerCase());
+      if (d && d.sentences.length) { donor = d; break; }
+    }
+    if (donor) {
+      if (!w.sentences.length) w.sentences = donor.sentences.slice(0, 3);
+      if (!w.meanings.length) w.meanings = donor.meanings.slice();
+      if (!w.phonetic) w.phonetic = donor.phonetic || '';
+      w.missing = [];
+      if (!w.meanings.length) w.missing.push('释义');
+      if (!w.sentences.length) w.missing.push('例句');
+      inherited++;
+    }
+  }
+  save();
   let quotaHit = false;
-  const queue = added.concat(updated.filter(w => !(w.sentences && w.sentences.length)));
+  const queue = added.filter(w => !(w.sentences.length && w.meanings.length)).concat(updated.filter(w => !(w.sentences && w.sentences.length)));
   if (queue.length) {
     openModal('<h3>🔄 正在获取词典数据<button class="close-x" data-act="x" hidden>✕</button></h3>' +
       '<p class="muted">为 ' + queue.length + ' 个单词获取中文释义、音标和例句…</p>' +
@@ -1986,6 +2007,7 @@ async function runImport(entries, bookId){
   closeModal();
   openModal('<h3>✅ 导入完成</h3>' +
     '<p class="muted">新增 <b>' + added.length + '</b> 个、更新例句 <b>' + updated.length + '</b> 个到「' + esc(book.name) + '」' +
+    (inherited ? '（其中 ' + inherited + ' 个从已有词本继承了数据）' : '') +
     (failed ? '，其中 ' + failed + ' 个联网查询失败' : '') +
     (quotaHit ? '。翻译额度已用尽，缺例句的单词可稍后在单词本中点击补充。' : '') +
     '</p><div class="modal-foot"><button class="btn btn-ghost" data-act="home">返回首页</button>' +
@@ -2101,6 +2123,26 @@ function exportBookCSV(){
 async function batchEnrichBook(){
   const b = currentBook();
   if (!b) return;
+  let inherited = 0;
+  for (const w of b.words) {
+    if ((w.sentences && w.sentences.length) && (w.meanings && w.meanings.length)) continue;
+    let donor = null;
+    for (const b2 of state.books) {
+      if (b2.id === b.id) continue;
+      const d = b2.words.find(x => x.text.toLowerCase() === w.text.toLowerCase());
+      if (d && d.sentences.length) { donor = d; break; }
+    }
+    if (donor) {
+      if (!(w.sentences && w.sentences.length)) w.sentences = donor.sentences.slice(0, 3);
+      if (!(w.meanings && w.meanings.length)) w.meanings = donor.meanings.slice();
+      if (!w.phonetic) w.phonetic = donor.phonetic || '';
+      w.missing = [];
+      if (!w.meanings.length) w.missing.push('释义');
+      if (!w.sentences.length) w.missing.push('例句');
+      inherited++;
+    }
+  }
+  save();
   const targets = b.words.filter(w => !(w.sentences && w.sentences.length) || !(w.meanings && w.meanings.length));
   if (!targets.length) { toast('所有单词都有释义和例句 🎉', 'ok'); return; }
   openModal('<h3>🔌 一键联网补全<button class="close-x" data-act="x" hidden>✕</button></h3>' +
@@ -2140,7 +2182,7 @@ async function batchEnrichBook(){
   const stillMiss = b.words.filter(w => !(w.sentences && w.sentences.length)).length;
   closeModal();
   openModal('<h3>✅ 补全完成</h3>' +
-    '<p class="muted">补到释义 <b>' + gotMean + '</b> 个，例句 <b>' + gotSent + '</b> 个' +
+    '<p class="muted">' + (inherited ? '从已有词本继承 <b>' + inherited + '</b> 个；联网补到释义 <b>' + gotMean + '</b> 个，例句 <b>' + gotSent + '</b> 个' : '补到释义 <b>' + gotMean + '</b> 个，例句 <b>' + gotSent + '</b> 个') +
     (stillMiss ? '；仍有 <b>' + stillMiss + '</b> 个缺例句（在线词典无数据），可导出「缺例句清单」发我补全' : '，全部单词都有例句了 🎉') +
     '</p><div class="modal-foot"><button class="btn btn-primary" data-act="x">完成</button></div>');
   $('#modal-root').onclick = e => { if (e.target.closest('[data-act=x]')) closeModal(); };
@@ -2201,7 +2243,7 @@ window.__CZ = {
   seedSampleIfEmpty,
   openImportModal,
 };
-console.log('词斩背单词 v1.6 · 离线词库 ' + Object.keys(DICT).length + ' 词 · 例句库 ' + Object.keys(SENT).length + ' 词 · 雅思词库 ' + IELTS_WORDS.length + ' 词 · 词形映射 ' + Object.keys(LEMMA).length + ' 项');
+console.log('词斩背单词 v1.7 · 离线词库 ' + Object.keys(DICT).length + ' 词 · 例句库 ' + Object.keys(SENT).length + ' 词 · 雅思词库 ' + IELTS_WORDS.length + ' 词 · 词形映射 ' + Object.keys(LEMMA).length + ' 项');
 </script>
 </body>
 </html>
