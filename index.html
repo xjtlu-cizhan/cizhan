@@ -543,6 +543,7 @@ h2.section-title{margin-top:26px}
       <button class="btn btn-ghost btn-small" id="book-add-word-btn">＋ 添加单词</button>
       <button class="btn btn-ghost btn-small" id="book-export-btn">⬇ 导出 CSV</button>
       <button class="btn btn-ghost btn-small" id="book-export-missing-btn">📋 缺例句清单</button>
+      <button class="btn btn-ghost btn-small" id="book-inherit-btn">📚 词库继承补全</button>
       <button class="btn btn-ghost btn-small" id="book-batch-enrich-btn">🔌 一键联网补全</button>
     </div>
     <div id="book-list"></div>
@@ -601,7 +602,7 @@ h2.section-title{margin-top:26px}
         <button class="btn btn-danger btn-small" id="set-reset">清空全部数据</button>
       </div>
     </div>
-    <p class="muted" style="text-align:center;margin-top:20px;font-size:12.5px">词斩背单词 v1.7 · 数据保存在浏览器本地 · 离线词库 + 双语例句库 + 雅思词库 · iPhone 可用 Safari 打开本站并「添加到主屏幕」</p>
+    <p class="muted" style="text-align:center;margin-top:20px;font-size:12.5px">词斩背单词 v1.8 · 数据保存在浏览器本地 · 离线词库 + 双语例句库 + 雅思词库 · iPhone 可用 Safari 打开本站并「添加到主屏幕」</p>
   </section>
 </main>
 
@@ -1560,6 +1561,23 @@ function openWordModal(w){
       return;
     }
     if (act === 'refetch') {
+      let donor = null, donorName = '';
+      for (const b2 of state.books) {
+        if (b2.id === b.id) continue;
+        const d = b2.words.find(x => x.text.toLowerCase() === w.text.toLowerCase());
+        if (d && d.sentences.length) { donor = d; donorName = b2.name; break; }
+      }
+      if (donor) {
+        if (!(w.sentences && w.sentences.length)) w.sentences = donor.sentences.slice(0, 3);
+        if (!(w.meanings && w.meanings.length)) w.meanings = donor.meanings.slice();
+        if (!w.phonetic) w.phonetic = donor.phonetic || '';
+        w.missing = [];
+        if (!w.meanings.length) w.missing.push('释义');
+        if (!w.sentences.length) w.missing.push('例句');
+        save(); closeModal(); renderBookView();
+        toast('已从「' + donorName + '」继承释义和例句 ✓', 'ok');
+        return;
+      }
       a.disabled = true; a.textContent = '获取中…';
       const res = await enrichWord(w.text, false, true);
       if (res.meanings && res.meanings.length) w.meanings = res.meanings;
@@ -2057,6 +2075,13 @@ $('#book-import-btn').onclick = () => openImportModal(state.currentBookId);
 $('#book-add-word-btn').onclick = () => openAddWordModal();
 $('#book-export-btn').onclick = exportBookCSV;
 $('#book-export-missing-btn').onclick = exportMissingCSV;
+$('#book-inherit-btn').onclick = () => {
+  const b = currentBook();
+  if (!b) return;
+  const n = inheritFromBooks(b);
+  if (n) { toast('已从其他词本（雅思词库等）继承补全 ' + n + ' 个单词 ✓', 'ok'); renderBookView(); }
+  else toast('没有可继承的单词：其他词本中没有对应数据，可试「一键联网补全」', 'err');
+};
 $('#book-batch-enrich-btn').onclick = batchEnrichBook;
 $('#book-search').addEventListener('input', debounce(renderBookView, 200));
 $$('#view-book .filter-chip').forEach(ch => ch.addEventListener('click', () => {
@@ -2120,15 +2145,13 @@ function exportBookCSV(){
   }).join(',')).join('\r\n');
   download('词斩单词本-' + b.name + '.csv', csv, 'text/csv;charset=utf-8');
 }
-async function batchEnrichBook(){
-  const b = currentBook();
-  if (!b) return;
+function inheritFromBooks(book){
   let inherited = 0;
-  for (const w of b.words) {
+  for (const w of book.words) {
     if ((w.sentences && w.sentences.length) && (w.meanings && w.meanings.length)) continue;
     let donor = null;
     for (const b2 of state.books) {
-      if (b2.id === b.id) continue;
+      if (b2.id === book.id) continue;
       const d = b2.words.find(x => x.text.toLowerCase() === w.text.toLowerCase());
       if (d && d.sentences.length) { donor = d; break; }
     }
@@ -2142,7 +2165,13 @@ async function batchEnrichBook(){
       inherited++;
     }
   }
-  save();
+  if (inherited) save();
+  return inherited;
+}
+async function batchEnrichBook(){
+  const b = currentBook();
+  if (!b) return;
+  const inherited = inheritFromBooks(b);
   const targets = b.words.filter(w => !(w.sentences && w.sentences.length) || !(w.meanings && w.meanings.length));
   if (!targets.length) { toast('所有单词都有释义和例句 🎉', 'ok'); return; }
   openModal('<h3>🔌 一键联网补全<button class="close-x" data-act="x" hidden>✕</button></h3>' +
@@ -2243,7 +2272,7 @@ window.__CZ = {
   seedSampleIfEmpty,
   openImportModal,
 };
-console.log('词斩背单词 v1.7 · 离线词库 ' + Object.keys(DICT).length + ' 词 · 例句库 ' + Object.keys(SENT).length + ' 词 · 雅思词库 ' + IELTS_WORDS.length + ' 词 · 词形映射 ' + Object.keys(LEMMA).length + ' 项');
+console.log('词斩背单词 v1.8 · 离线词库 ' + Object.keys(DICT).length + ' 词 · 例句库 ' + Object.keys(SENT).length + ' 词 · 雅思词库 ' + IELTS_WORDS.length + ' 词 · 词形映射 ' + Object.keys(LEMMA).length + ' 项');
 </script>
 </body>
 </html>
