@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -32,6 +32,8 @@ body{
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Hiragino Sans GB",sans-serif;
   background:var(--bg); color:var(--text); font-size:15px; line-height:1.6;
   -webkit-font-smoothing:antialiased;
+  -webkit-touch-callout:none;
+  touch-action:manipulation;
 }
 button,a,input,textarea,select,label,.word-row,.book-add,.import-drop,.filter-chip,.quiz-opt,.rate-btn,.cal-cell{
   touch-action:manipulation;-webkit-tap-highlight-color:transparent;
@@ -82,7 +84,7 @@ h2.section-title{margin-top:26px}
   padding:11px 22px;border-radius:14px;font-size:15px;font-weight:600;transition:.15s;
   border:1px solid transparent;user-select:none;
 }
-.btn:active{transform:scale(.97)}
+.btn:active{filter:brightness(.94)}
 .btn-primary{background:var(--primary);color:#fff;box-shadow:0 6px 16px rgba(11,189,91,.32)}
 .btn-primary:hover{background:var(--primary-d)}
 .btn-ghost{background:var(--card);border-color:var(--border)}
@@ -203,7 +205,7 @@ h2.section-title{margin-top:26px}
   flex:none;border:1px solid color-mix(in srgb,var(--primary) 25%,var(--border));
 }
 [data-theme=dark] .audio-btn{color:var(--primary)}
-.audio-btn:hover{background:var(--primary);color:#fff;transform:scale(1.08)}
+.audio-btn:hover{background:var(--primary);color:#fff}
 .audio-btn.playing{animation:pulse 1s infinite}
 @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.12)}}
 .meaning-block{margin:22px 0 6px;text-align:left}
@@ -602,7 +604,7 @@ h2.section-title{margin-top:26px}
         <button class="btn btn-danger btn-small" id="set-reset">清空全部数据</button>
       </div>
     </div>
-    <p class="muted" style="text-align:center;margin-top:20px;font-size:12.5px">词斩背单词 v1.8 · 数据保存在浏览器本地 · 离线词库 + 双语例句库 + 雅思词库 · iPhone 可用 Safari 打开本站并「添加到主屏幕」</p>
+    <p class="muted" style="text-align:center;margin-top:20px;font-size:12.5px">词斩背单词 v1.9 · 数据保存在浏览器本地 · 离线词库 + 双语例句库 + 雅思词库 · iPhone 可用 Safari 打开本站并「添加到主屏幕」</p>
   </section>
 </main>
 
@@ -807,9 +809,9 @@ async function enrichWord(text, keepUserMeaning, force){
   const key = (text || '').toLowerCase().trim();
   if (!keepUserMeaning && !force && dictCache[key]) {
     const c = dictCache[key];
-    return { phonetic: c.phonetic, meanings: c.meanings.slice(), sentences: c.sentences.slice(), quota: false };
+    return { phonetic: c.phonetic, meanings: c.meanings.slice(), sentences: c.sentences.slice(), audioUrl: c.audioUrl || '', quota: false };
   }
-  const res = { phonetic:'', meanings:[], sentences:[], quota:false };
+  const res = { phonetic:'', meanings:[], sentences:[], audioUrl:'', quota:false };
   const haveUser = keepUserMeaning === true;
   /* 1) 离线词库（含词形还原），瞬间完成 */
   const loc = lookupLocal(key);
@@ -826,6 +828,7 @@ async function enrichWord(text, keepUserMeaning, force){
     if (d && d.length) {
       const e = d[0];
       if (!res.phonetic) res.phonetic = e.phonetic || ((e.phonetics||[]).map(p=>p.text).find(Boolean)) || '';
+      res.audioUrl = ((e.phonetics||[]).map(p=>p.audio).find(Boolean)) || '';
       const exs = [];
       let firstDef = null;
       for (const m of (e.meanings || [])) {
@@ -863,27 +866,37 @@ async function enrichWord(text, keepUserMeaning, force){
 }
 
 /* ================= audio ================= */
-const audioErrCache = {};
 function audioURL(word, accent){ return 'https://dict.youdao.com/dictvoice?audio=' + encodeURIComponent(word) + '&type=' + (accent || 1); }
-async function playWord(word){
+let audioEl = null;
+function getAudioEl(){
+  if (!audioEl) { audioEl = new Audio(); audioEl.preload = 'auto'; }
+  return audioEl;
+}
+async function playWord(word, audioUrl){
   const accent = state.settings.accent || 1;
-  const key = (word || '').toLowerCase() + '#' + accent;
-  if (!audioErrCache[key]) {
+  const sources = [audioURL(word, accent)];
+  if (audioUrl && sources[0] !== audioUrl) sources.push(audioUrl);
+  const el = getAudioEl();
+  for (const src of sources) {
     try {
-      await new Promise((res, rej) => {
-        const a = new Audio(audioURL(word, accent));
-        const done = ()=>res();
-        a.onerror = () => { audioErrCache[key] = true; rej(new Error('remote audio failed')); };
-        a.onended = done;
-        a.onpause = () => setTimeout(done, 400);
-        a.play().catch(e => { audioErrCache[key] = true; rej(e); });
-        setTimeout(done, 8000);
-      });
-      return;
-    } catch(e){}
+      el.pause();
+      el.src = src;
+      el.load();
+      await el.play();
+      return; /* 开始播放即成功 */
+    } catch(e){ /* 换下一个音源 */ }
   }
+  /* 本地 TTS 兜底（等 voices 就绪，iOS 首次为空） */
   if ('speechSynthesis' in window) {
     try {
+      if (!speechSynthesis.getVoices().length) {
+        await new Promise(res => {
+          let t;
+          const done = () => { clearTimeout(t); res(); };
+          speechSynthesis.onvoiceschanged = done;
+          t = setTimeout(done, 1500);
+        });
+      }
       const u = new SpeechSynthesisUtterance(word);
       u.lang = accent === 2 ? 'en-GB' : 'en-US';
       u.rate = 0.88;
@@ -1087,7 +1100,7 @@ function renderStudy(){
       '<button class="btn btn-ghost btn-small" data-audio="2">🔊 再听一遍</button>' +
       '<button class="btn btn-ghost btn-small" id="learn-skip-btn" hidden>跳过本题</button>' +
       '</div>';
-    if (state.settings.autoplay) playWord(w.text);
+    if (state.settings.autoplay) playWord(w.text, w.audioUrl);
   }
   bindStudyEvents();
 }
@@ -1266,7 +1279,7 @@ function bindStudyEvents(){
     const audioBtn = e.target.closest('[data-audio]');
     if (audioBtn) {
       const item = session.queue[session.idx];
-      if (item) { const b = audioBtn; b.classList.add('playing'); playWord(item.w.text).finally(()=>setTimeout(()=>b.classList.remove('playing'), 600)); }
+      if (item) { const b = audioBtn; b.classList.add('playing'); playWord(item.w.text, item.w.audioUrl).finally(()=>setTimeout(()=>b.classList.remove('playing'), 600)); }
       return;
     }
     const gradeBtn = e.target.closest('[data-grade]');
@@ -1506,7 +1519,7 @@ function renderBookView(){
     if (!row) return;
     const w = b.words.find(x => x.id === row.dataset.wid);
     if (!w) return;
-    if (playBtn) { playWord(w.text); return; }
+    if (playBtn) { playWord(w.text, w.audioUrl); return; }
     openWordModal(w);
   };
   $('#book-back').onclick = () => showView('dashboard');
@@ -1534,7 +1547,7 @@ function openWordModal(w){
     if (!a) return;
     const act = a.dataset.act;
     if (act === 'x') { closeModal(); return; }
-    if (act === 'audio') { playWord(w.text); return; }
+    if (act === 'audio') { playWord(w.text, w.audioUrl); return; }
     if (act === 'save') {
       w.phonetic = $('#wm-phon').value.trim();
       w.meanings = $('#wm-meanings').value.split(/\\n|\r?\n/).map(s => s.trim()).filter(Boolean);
@@ -1582,6 +1595,7 @@ function openWordModal(w){
       const res = await enrichWord(w.text, false, true);
       if (res.meanings && res.meanings.length) w.meanings = res.meanings;
       if (res.phonetic) w.phonetic = w.phonetic || res.phonetic;
+      if (res.audioUrl) w.audioUrl = w.audioUrl || res.audioUrl;
       if (res.sentences && res.sentences.length) w.sentences = res.sentences;
       w.missing = [];
       if (!w.meanings.length) w.missing.push('释义');
@@ -2009,6 +2023,7 @@ async function runImport(entries, bookId){
           const res = await enrichWord(w.text, w.meanings.length > 0);
           if (res.meanings && res.meanings.length) w.meanings = res.meanings;
           if (res.phonetic) w.phonetic = w.phonetic || res.phonetic;
+          if (res.audioUrl) w.audioUrl = w.audioUrl || res.audioUrl;
           if (res.sentences && res.sentences.length) w.sentences = res.sentences;
           w.enriched = true;
           if (res.quota) quotaHit = true;
@@ -2058,7 +2073,7 @@ document.addEventListener('keydown', e => {
   }
   if (e.key === 'a' || e.key === 'A') {
     const item = session.queue && session.queue[session.idx];
-    if (item) playWord(item.w.text);
+    if (item) playWord(item.w.text, item.w.audioUrl);
   }
 });
 document.addEventListener('dragover', e => e.preventDefault());
@@ -2123,6 +2138,7 @@ function openAddWordModal(){
       const res = await enrichWord(text, meanings.length > 0);
       if (res.meanings && res.meanings.length) w.meanings = res.meanings;
       if (res.phonetic) w.phonetic = w.phonetic || res.phonetic;
+      if (res.audioUrl) w.audioUrl = w.audioUrl || res.audioUrl;
       if (res.sentences && res.sentences.length) w.sentences = res.sentences;
       w.missing = [];
       if (!w.meanings.length) w.missing.push('释义');
@@ -2196,6 +2212,7 @@ async function batchEnrichBook(){
           const hadS = (w.sentences && w.sentences.length) > 0;
           if (!hadM && res.meanings && res.meanings.length) { w.meanings = res.meanings; gotMean++; }
           if (res.phonetic && !w.phonetic) w.phonetic = res.phonetic;
+          if (res.audioUrl && !w.audioUrl) w.audioUrl = res.audioUrl;
           if (!hadS && res.sentences && res.sentences.length) { w.sentences = res.sentences; gotSent++; }
           if (res.quota) quotaHit = true;
           w.missing = [];
@@ -2272,7 +2289,7 @@ window.__CZ = {
   seedSampleIfEmpty,
   openImportModal,
 };
-console.log('词斩背单词 v1.8 · 离线词库 ' + Object.keys(DICT).length + ' 词 · 例句库 ' + Object.keys(SENT).length + ' 词 · 雅思词库 ' + IELTS_WORDS.length + ' 词 · 词形映射 ' + Object.keys(LEMMA).length + ' 项');
+console.log('词斩背单词 v1.9 · 离线词库 ' + Object.keys(DICT).length + ' 词 · 例句库 ' + Object.keys(SENT).length + ' 词 · 雅思词库 ' + IELTS_WORDS.length + ' 词 · 词形映射 ' + Object.keys(LEMMA).length + ' 项');
 </script>
 </body>
 </html>
